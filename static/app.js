@@ -9,6 +9,8 @@ const state = {
     videoFormats: [],
     taskId: null,
     ws: null,
+    lastSearchResults: null,
+    lastSearchQuery: '',
 };
 
 // --- Referencias DOM ---
@@ -44,6 +46,8 @@ const els = {
     toastContainer: $('#toastContainer'),
     searchResults: $('#searchResults'),
     searchGrid: $('#searchGrid'),
+    backToResultsBtn: $('#backToResultsBtn'),
+    backToResultsBtnComplete: $('#backToResultsBtnComplete'),
 };
 
 // --- Inicialización ---
@@ -140,6 +144,10 @@ function bindEvents() {
     // Botón Reset / Nuevo Análisis
     els.newAnalysisBtn.addEventListener('click', resetUI);
 
+    // Botón Volver a resultados (ambos)
+    els.backToResultsBtn.addEventListener('click', backToResults);
+    els.backToResultsBtnComplete.addEventListener('click', backToResults);
+
     // Guardar archivo manual
     els.saveFileBtn.addEventListener('click', saveFile);
 
@@ -186,6 +194,9 @@ async function searchYoutube(query) {
 
 // --- Mostrar resultados de búsqueda ---
 function displaySearchResults(results) {
+    // Cachear resultados para navegación persistente
+    state.lastSearchResults = results;
+
     hideAllSections();
     els.searchResults.classList.remove('hidden');
     els.searchGrid.innerHTML = '';
@@ -221,6 +232,13 @@ function displaySearchResults(results) {
     });
 }
 
+// --- Volver a resultados de búsqueda ---
+function backToResults() {
+    if (state.lastSearchResults) {
+        displaySearchResults(state.lastSearchResults);
+    }
+}
+
 // --- Obtener info del video ---
 async function fetchVideoInfo(urlFromInput = null) {
     const url = urlFromInput || els.urlInput.value.trim();
@@ -245,6 +263,13 @@ async function fetchVideoInfo(urlFromInput = null) {
 
         const data = await response.json();
         displayVideoInfo(data);
+
+        // Mostrar botón "Volver a resultados" si hay resultados cacheados
+        if (state.lastSearchResults) {
+            els.backToResultsBtn.classList.remove('hidden');
+        } else {
+            els.backToResultsBtn.classList.add('hidden');
+        }
     } catch (error) {
         showToast(error.message, 'error');
         resetUI();
@@ -362,6 +387,13 @@ function finishDownload(filename) {
     
     if (state.ws) state.ws.close();
 
+    // Mostrar "Volver a resultados" si hay resultados cacheados
+    if (state.lastSearchResults) {
+        els.backToResultsBtnComplete.classList.remove('hidden');
+    } else {
+        els.backToResultsBtnComplete.classList.add('hidden');
+    }
+
     // AUTO-DOWNLOAD: Trigger saving the file automatically
     setTimeout(() => {
         saveFile();
@@ -397,7 +429,11 @@ function resetUI() {
     hideAllSections();
     els.urlInput.value = '';
     els.clearBtn.classList.remove('visible');
+    els.backToResultsBtn.classList.add('hidden');
+    els.backToResultsBtnComplete.classList.add('hidden');
     state.taskId = null;
+    state.lastSearchResults = null;
+    state.lastSearchQuery = '';
     if (state.ws) state.ws.close();
 }
 
