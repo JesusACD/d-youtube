@@ -1,0 +1,353 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>d-youtube — Descargador de YouTube</title>
+    <meta
+      name="description"
+      content="Descarga videos de YouTube en MP3 y video de alta calidad. Rápido, seguro y moderno."
+    />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <!-- Fondo animado con partículas -->
+    <div class="bg-particles" id="particles"></div>
+
+    <!-- Contenedor principal -->
+    <div class="app-container">
+      <!-- Header -->
+      <header class="app-header">
+        <div class="logo">
+          <div class="logo-icon">
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              xmlns="http://www.w3.org/2000/svg"
+            >
+              <path
+                d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 14.5v-9l6 4.5-6 4.5z"
+                fill="url(#iconGrad)"
+              />
+              <defs>
+                <linearGradient id="iconGrad" x1="2" y1="2" x2="22" y2="22">
+                  <stop offset="0%" stop-color="#FF6B6B" />
+                  <stop offset="100%" stop-color="#845EF7" />
+                </linearGradient>
+              </defs>
+            </svg>
+          </div>
+          <h1>d-youtube</h1>
+        </div>
+        <p class="subtitle">Descargador de YouTube premium — MP3 & Video HD</p>
+      </header>
+
+      <!-- Sección de entrada de URL -->
+      <section class="url-section">
+        <div class="glass-card">
+          <div class="input-group">
+            <div class="input-wrapper">
+              <svg class="input-icon" viewBox="0 0 24 24" fill="none">
+                <path
+                  d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                />
+                <path
+                  d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                />
+              </svg>
+              <input
+                type="text"
+                id="urlInput"
+                placeholder="Pega la URL del video de YouTube aquí..."
+                autocomplete="off"
+              />
+              <button id="clearBtn" class="clear-btn" title="Limpiar">
+                <svg viewBox="0 0 24 24" fill="none">
+                  <line
+                    x1="18"
+                    y1="6"
+                    x2="6"
+                    y2="18"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                  />
+                  <line
+                    x1="6"
+                    y1="6"
+                    x2="18"
+                    y2="18"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                  />
+                </svg>
+              </button>
+            </div>
+            <button id="fetchBtn" class="btn btn-primary">
+              <svg viewBox="0 0 24 24" fill="none" class="btn-icon">
+                <circle
+                  cx="11"
+                  cy="11"
+                  r="8"
+                  stroke="currentColor"
+                  stroke-width="2"
+                />
+                <line
+                  x1="21"
+                  y1="21"
+                  x2="16.65"
+                  y2="16.65"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  stroke-linecap="round"
+                />
+              </svg>
+              <span>Analizar</span>
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Estado de carga -->
+      <div id="loadingState" class="loading-state hidden">
+        <div class="spinner"></div>
+        <p>Analizando video...</p>
+      </div>
+
+      <!-- Resultado: Información del video -->
+      <section id="videoInfo" class="video-info hidden">
+        <div class="glass-card video-card">
+          <div class="video-preview">
+            <img id="videoThumbnail" src="" alt="Thumbnail" class="thumbnail" />
+            <div class="duration-badge" id="videoDuration">0:00</div>
+          </div>
+          <div class="video-details">
+            <h2 id="videoTitle" class="video-title">Título del video</h2>
+            <div class="video-meta">
+              <span class="meta-item">
+                <svg viewBox="0 0 24 24" fill="none" width="16" height="16">
+                  <path
+                    d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                  />
+                  <circle
+                    cx="12"
+                    cy="7"
+                    r="4"
+                    stroke="currentColor"
+                    stroke-width="2"
+                  />
+                </svg>
+                <span id="videoUploader">Canal</span>
+              </span>
+              <span class="meta-item">
+                <svg viewBox="0 0 24 24" fill="none" width="16" height="16">
+                  <path
+                    d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"
+                    stroke="currentColor"
+                    stroke-width="2"
+                  />
+                  <circle
+                    cx="12"
+                    cy="12"
+                    r="3"
+                    stroke="currentColor"
+                    stroke-width="2"
+                  />
+                </svg>
+                <span id="videoViews">0 views</span>
+              </span>
+            </div>
+
+            <!-- Selector de formato -->
+            <div class="format-selector">
+              <h3>SELECCIONAR FORMATO</h3>
+              
+              <!-- Acciones directas (Quick Download) -->
+              <div class="format-actions">
+                <button class="action-btn mp3-btn" id="downloadMp3Btn">
+                  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M9 18V5l12-2v13"></path>
+                    <circle cx="6" cy="18" r="3"></circle>
+                    <circle cx="18" cy="16" r="3"></circle>
+                  </svg>
+                  <span>DESCARGAR MP3</span>
+                  <small>Audio 320kbps</small>
+                </button>
+                
+                <button class="action-btn video-btn" id="downloadVideoBtn">
+                  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <rect x="2" y="2" width="20" height="20" rx="2.18" ry="2.18"></rect>
+                    <line x1="7" y1="2" x2="7" y2="22"></line>
+                    <line x1="17" y1="2" x2="17" y2="22"></line>
+                    <line x1="2" y1="12" x2="22" y2="12"></line>
+                    <line x1="2" y1="7" x2="7" y2="7"></line>
+                    <line x1="2" y1="17" x2="7" y2="17"></line>
+                    <line x1="17" y1="17" x2="22" y2="17"></line>
+                    <line x1="17" y1="7" x2="22" y2="7"></line>
+                  </svg>
+                  <span>DESCARGAR VIDEO</span>
+                  <small>Alta Calidad</small>
+                </button>
+              </div>
+
+              <!-- Selector de Calidad (Solo Video) -->
+              <div class="quality-section" id="qualitySelector">
+                <label>CALIDAD MÁXIMA:</label>
+                <div class="quality-options" id="qualityOptions">
+                  <!-- Se llena dinámicamente -->
+                </div>
+              </div>
+
+              <button id="newAnalysisBtn" class="btn btn-ghost">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M21 12H3m18 0-4-4m4 4-4 4"></path>
+                </svg>
+                <span>Analizar otro video</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Progreso de descarga -->
+      <section id="downloadProgress" class="download-progress hidden">
+        <div class="glass-card progress-card">
+          <div class="progress-header">
+            <h3 id="progressTitle">Descargando...</h3>
+            <span id="progressPercent" class="progress-percent">0%</span>
+          </div>
+          <div class="progress-bar-container">
+            <div class="progress-bar" id="progressBar">
+              <div class="progress-glow"></div>
+            </div>
+          </div>
+          <div class="progress-stats">
+            <span id="progressSpeed" class="stat">
+              <svg viewBox="0 0 24 24" fill="none" width="14" height="14">
+                <path
+                  d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                />
+              </svg>
+              --
+            </span>
+            <span id="progressETA" class="stat">
+              <svg viewBox="0 0 24 24" fill="none" width="14" height="14">
+                <circle
+                  cx="12"
+                  cy="12"
+                  r="10"
+                  stroke="currentColor"
+                  stroke-width="2"
+                />
+                <polyline
+                  points="12,6 12,12 16,14"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  stroke-linecap="round"
+                />
+              </svg>
+              --
+            </span>
+          </div>
+        </div>
+      </section>
+
+      <!-- Descarga completada -->
+      <section id="downloadComplete" class="download-complete hidden">
+        <div class="glass-card complete-card">
+          <div class="success-icon">
+            <svg viewBox="0 0 24 24" fill="none">
+              <circle
+                cx="12"
+                cy="12"
+                r="10"
+                stroke="url(#successGrad)"
+                stroke-width="2"
+              />
+              <polyline
+                points="8,12 11,15 16,9"
+                stroke="url(#successGrad)"
+                stroke-width="2.5"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+              <defs>
+                <linearGradient id="successGrad" x1="4" y1="4" x2="20" y2="20">
+                  <stop offset="0%" stop-color="#51CF66" />
+                  <stop offset="100%" stop-color="#20C997" />
+                </linearGradient>
+              </defs>
+            </svg>
+          </div>
+          <h3>¡Descarga completada!</h3>
+          <p id="completedFilename">archivo.mp3</p>
+          <button id="saveFileBtn" class="btn btn-success">
+            <svg viewBox="0 0 24 24" fill="none" class="btn-icon">
+              <path
+                d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+              />
+              <polyline
+                points="7,10 12,15 17,10"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+              <line
+                x1="12"
+                y1="15"
+                x2="12"
+                y2="3"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+              />
+            </svg>
+            <span>Guardar archivo</span>
+          </button>
+          <button id="newDownloadBtn" class="btn btn-ghost">
+            Nueva descarga
+          </button>
+        </div>
+      </section>
+
+      <!-- Mensajes de error -->
+      <div id="toastContainer" class="toast-container"></div>
+
+      <!-- Footer -->
+      <footer class="app-footer">
+        <p>
+          Powered by <strong>yt-dlp</strong> & <strong>FFmpeg</strong> —
+          d-youtube v1.0
+        </p>
+      </footer>
+    </div>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>
