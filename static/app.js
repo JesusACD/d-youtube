@@ -42,6 +42,8 @@ const els = {
     saveFileBtn: $('#saveFileBtn'),
     newDownloadBtn: $('#newDownloadBtn'),
     toastContainer: $('#toastContainer'),
+    searchResults: $('#searchResults'),
+    searchGrid: $('#searchGrid'),
 };
 
 // --- Inicialización ---
@@ -79,14 +81,20 @@ function createParticles() {
 
 // --- Event Listeners ---
 function bindEvents() {
-    // Escuchar cambios en el input para Análisis Automático
+    // Escuchar cambios en el input para Análisis Automático / Búsqueda
     els.urlInput.addEventListener('input', (e) => {
-        const url = e.target.value.trim();
-        els.clearBtn.classList.toggle('visible', url.length > 0);
+        const query = e.target.value.trim();
+        els.clearBtn.classList.toggle('visible', query.length > 0);
         
+        // Si no hay nada, resetear vista
+        if (!query) {
+            hideAllSections();
+            return;
+        }
+
         // Si la URL es válida, analizar de una vez
-        if (isValidYoutubeUrl(url)) {
-            fetchVideoInfo(url);
+        if (isValidYoutubeUrl(query)) {
+            fetchVideoInfo(query);
         }
     });
 
@@ -95,14 +103,34 @@ function bindEvents() {
         els.urlInput.value = '';
         els.clearBtn.classList.remove('visible');
         els.urlInput.focus();
+        hideAllSections();
     });
 
-    // Botón Analizar (fallback)
-    els.fetchBtn.addEventListener('click', () => fetchVideoInfo());
+    // Botón Analizar / Buscar
+    els.fetchBtn.addEventListener('click', () => {
+        const query = els.urlInput.value.trim();
+        console.log('[DEBUG] Query:', query);
+        if (isValidYoutubeUrl(query)) {
+            console.log('[DEBUG] Es una URL válida');
+            fetchVideoInfo(query);
+        } else if (query.length > 2) {
+            console.log('[DEBUG] No es URL, buscando:', query);
+            searchYoutube(query);
+        } else {
+            showToast('Escribe al menos 3 caracteres para buscar.', 'info');
+        }
+    });
     
-    // Enter para buscar
+    // Enter para buscar/analizar
     els.urlInput.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') fetchVideoInfo();
+        if (e.key === 'Enter') {
+            const query = els.urlInput.value.trim();
+            if (isValidYoutubeUrl(query)) {
+                fetchVideoInfo(query);
+            } else if (query.length > 2) {
+                searchYoutube(query);
+            }
+        }
     });
 
     // Descargas Directas
@@ -126,6 +154,71 @@ function isValidYoutubeUrl(url) {
         /^[a-zA-Z0-9_-]{11}$/ // ID de video
     ];
     return patterns.some(pattern => pattern.test(url));
+}
+
+// --- Buscar en YouTube ---
+async function searchYoutube(query) {
+    hideAllSections();
+    els.loadingState.classList.remove('hidden');
+    els.fetchBtn.disabled = true;
+
+    try {
+        const response = await fetch('/api/search', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url: query }), // Usamos 'url' como campo para la query en el backend
+        });
+
+        if (!response.ok) {
+            const error = await response.json();
+            throw new Error(error.detail || 'Error en la búsqueda');
+        }
+
+        const data = await response.json();
+        displaySearchResults(data.results);
+    } catch (error) {
+        showToast(error.message, 'error');
+        resetUI();
+    } finally {
+        els.fetchBtn.disabled = false;
+    }
+}
+
+// --- Mostrar resultados de búsqueda ---
+function displaySearchResults(results) {
+    hideAllSections();
+    els.searchResults.classList.remove('hidden');
+    els.searchGrid.innerHTML = '';
+
+    if (results.length === 0) {
+        els.searchGrid.innerHTML = '<p class="no-results">No se encontraron videos.</p>';
+        return;
+    }
+
+    results.forEach(video => {
+        const card = document.createElement('div');
+        card.className = 'search-card';
+        card.innerHTML = `
+            <div class="search-card-thumb">
+                <img src="${video.thumbnail}" alt="${video.title}">
+                <div class="search-card-duration">${video.duration}</div>
+            </div>
+            <div class="search-card-content">
+                <h4 class="search-card-title">${video.title}</h4>
+                <div class="search-card-meta">
+                    <span>${video.uploader}</span>
+                    <span>${formatNumber(video.view_count)} vistas</span>
+                </div>
+            </div>
+        `;
+        
+        card.addEventListener('click', () => {
+            els.urlInput.value = video.url;
+            fetchVideoInfo(video.url);
+        });
+        
+        els.searchGrid.appendChild(card);
+    });
 }
 
 // --- Obtener info del video ---
@@ -295,6 +388,7 @@ function saveFile() {
 function hideAllSections() {
     els.videoInfo.classList.add('hidden');
     els.loadingState.classList.add('hidden');
+    els.searchResults.classList.add('hidden');
     els.downloadProgress.classList.add('hidden');
     els.downloadComplete.classList.add('hidden');
 }

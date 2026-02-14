@@ -64,13 +64,20 @@ def cleanup_old_files():
         pass
 
 
-def format_duration(seconds: int) -> str:
+def format_duration(seconds) -> str:
     """Formatea duración en segundos a formato legible."""
     if not seconds:
         return "Desconocida"
+    
+    try:
+        seconds = int(float(seconds))
+    except (ValueError, TypeError):
+        return "Desconocida"
+        
     hours = seconds // 3600
     minutes = (seconds % 3600) // 60
     secs = seconds % 60
+    
     if hours > 0:
         return f"{hours}:{minutes:02d}:{secs:02d}"
     return f"{minutes}:{secs:02d}"
@@ -85,6 +92,12 @@ def format_filesize(size_bytes: Optional[int]) -> str:
             return f"{size_bytes:.1f} {unit}"
         size_bytes /= 1024
     return f"{size_bytes:.1f} TB"
+
+
+def _ydl_extract(url: str, opts: dict) -> dict:
+    """Helper genérico para extraer información con yt-dlp."""
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        return ydl.extract_info(url, download=False)
 
 
 def _extract_info_sync(url: str) -> dict:
@@ -120,6 +133,54 @@ async def serve_frontend():
         return JSONResponse({"error": f"No se encontró index.html en {STATIC_DIR}"}, status_code=404)
     return FileResponse(INDEX_PATH)
 
+
+@app.post("/api/search")
+async def search_youtube(request: VideoInfoRequest):
+    """Busca videos en YouTube basándose en una consulta."""
+    if not request.url: # En este caso 'url' es la consulta
+        raise HTTPException(status_code=400, detail="La consulta de búsqueda no puede estar vacía.")
+    
+    ydl_opts = {
+        'extract_flat': True,
+        'quiet': True,
+        'no_warnings': True,
+        'no_check_certificates': True,
+        'geo_bypass': True,
+        'noplaylist': True,
+    }
+    
+    try:
+        loop = asyncio.get_running_loop()
+        # Buscamos los primeros 10 resultados
+        search_query = f"ytsearch10:{request.url}"
+        results = await loop.run_in_executor(None, lambda: _ydl_extract(search_query, ydl_opts))
+        
+        if not results or 'entries' not in results:
+            return {"results": []}
+            
+        processed_results = []
+        for entry in results['entries']:
+            # Intentar obtener la mejor miniatura
+            thumbnail = entry.get("thumbnail")
+            thumbnails = entry.get("thumbnails")
+            if thumbnails and len(thumbnails) > 0:
+                thumbnail = thumbnails[-1].get("url")
+
+            processed_results.append({
+                "id": entry.get("id"),
+                "title": entry.get("title"),
+                "url": f"https://www.youtube.com/watch?v={entry.get('id')}",
+                "thumbnail": thumbnail,
+                "duration": format_duration(entry.get("duration", 0)),
+                "uploader": entry.get("uploader"),
+                "view_count": entry.get("view_count")
+            })
+            
+        return {"results": processed_results}
+
+    except Exception as e:
+        print(f"[ERROR] Error en búsqueda: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error en la búsqueda: {str(e)}")
 
 @app.post("/api/info")
 async def get_video_info(request: VideoInfoRequest):

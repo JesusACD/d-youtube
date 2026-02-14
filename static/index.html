@@ -100,24 +100,10 @@
             </div>
             <button id="fetchBtn" class="btn btn-primary">
               <svg viewBox="0 0 24 24" fill="none" class="btn-icon">
-                <circle
-                  cx="11"
-                  cy="11"
-                  r="8"
-                  stroke="currentColor"
-                  stroke-width="2"
-                />
-                <line
-                  x1="21"
-                  y1="21"
-                  x2="16.65"
-                  y2="16.65"
-                  stroke="currentColor"
-                  stroke-width="2"
-                  stroke-linecap="round"
-                />
+                <circle cx="11" cy="11" r="8" stroke="currentColor" stroke-width="2"/>
+                <line x1="21" y1="21" x2="16.65" y2="16.65" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
               </svg>
-              <span>Analizar</span>
+              <span>Buscar o Analizar</span>
             </button>
           </div>
         </div>
@@ -128,6 +114,14 @@
         <div class="spinner"></div>
         <p>Analizando video...</p>
       </div>
+
+      <!-- Resultados de Búsqueda -->
+      <section id="searchResults" class="search-results hidden">
+        <h3 class="search-title">Resultados de búsqueda</h3>
+        <div id="searchGrid" class="search-grid">
+          <!-- Inyectado por JS -->
+        </div>
+      </section>
 
       <!-- Resultado: Información del video -->
       <section id="videoInfo" class="video-info hidden">
