@@ -211,6 +211,52 @@
                 </button>
               </div>
 
+              <!-- Recorte Inteligente -->
+              <div class="trim-section">
+                <div class="trim-toggle">
+                  <label class="toggle-switch">
+                    <input type="checkbox" id="trimToggle">
+                    <span class="toggle-slider"></span>
+                  </label>
+                  <div class="trim-toggle-label">
+                    <span>✂️ Recorte Inteligente</span>
+                    <small>Descarga solo una parte del video</small>
+                  </div>
+                </div>
+                <div id="trimControls" class="trim-controls hidden">
+                  <!-- Barra visual del timeline -->
+                  <div class="trim-timeline" id="trimTimeline">
+                    <div class="trim-track">
+                      <div class="trim-range" id="trimRange"></div>
+                      <input type="range" class="trim-slider trim-slider-start" id="trimSliderStart" min="0" max="100" value="0" step="1">
+                      <input type="range" class="trim-slider trim-slider-end" id="trimSliderEnd" min="0" max="100" value="100" step="1">
+                    </div>
+                    <div class="trim-time-labels">
+                      <span id="trimLabelStart">0:00</span>
+                      <span class="trim-duration-label" id="trimDurationLabel">Duración: 0:00</span>
+                      <span id="trimLabelEnd">0:00</span>
+                    </div>
+                  </div>
+                  <!-- Inputs manuales -->
+                  <div class="trim-inputs">
+                    <div class="trim-field">
+                      <label for="trimStart">Inicio</label>
+                      <input type="text" id="trimStart" placeholder="0:00" value="0:00">
+                    </div>
+                    <div class="trim-separator">
+                      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <line x1="5" y1="12" x2="19" y2="12"></line>
+                        <polyline points="12 5 19 12 12 19"></polyline>
+                      </svg>
+                    </div>
+                    <div class="trim-field">
+                      <label for="trimEnd">Fin</label>
+                      <input type="text" id="trimEnd" placeholder="3:45">
+                    </div>
+                  </div>
+                </div>
+              </div>
+
               <!-- Selector de Calidad (Solo Video) -->
               <div class="quality-section" id="qualitySelector">
                 <label>CALIDAD MÁXIMA:</label>

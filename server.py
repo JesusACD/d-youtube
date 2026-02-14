@@ -48,6 +48,8 @@ class DownloadRequest(BaseModel):
     url: str
     format_type: str  # "mp3" o "video"
     quality: Optional[str] = "best"  # Calidad del video
+    trim_start: Optional[str] = None  # Tiempo de inicio "MM:SS" o "HH:MM:SS"
+    trim_end: Optional[str] = None    # Tiempo de fin "MM:SS" o "HH:MM:SS"
 
 
 # --- Utilidades ---
@@ -98,6 +100,59 @@ def _ydl_extract(url: str, opts: dict) -> dict:
     """Helper genérico para extraer información con yt-dlp."""
     with yt_dlp.YoutubeDL(opts) as ydl:
         return ydl.extract_info(url, download=False)
+
+
+def _time_to_seconds(time_str: str) -> float:
+    """Convierte un string de tiempo (MM:SS o HH:MM:SS) a segundos."""
+    parts = time_str.strip().split(':')
+    parts = [float(p) for p in parts]
+    if len(parts) == 3:
+        return parts[0] * 3600 + parts[1] * 60 + parts[2]
+    elif len(parts) == 2:
+        return parts[0] * 60 + parts[1]
+    return parts[0]
+
+
+def _trim_file(filepath: Path, trim_start: str = None, trim_end: str = None) -> Path:
+    """Recorta un archivo de audio/video usando ffmpeg."""
+    import subprocess
+
+    suffix = filepath.suffix
+    trimmed_path = filepath.parent / f"{filepath.stem}_trimmed{suffix}"
+
+    cmd = ['ffmpeg', '-y']
+
+    if trim_start:
+        cmd.extend(['-ss', trim_start])
+
+    cmd.extend(['-i', str(filepath)])
+
+    if trim_end:
+        # Si hay trim_start, calcular duración relativa
+        if trim_start:
+            start_sec = _time_to_seconds(trim_start)
+            end_sec = _time_to_seconds(trim_end)
+            duration = end_sec - start_sec
+            if duration > 0:
+                cmd.extend(['-t', str(duration)])
+        else:
+            cmd.extend(['-to', trim_end])
+
+    cmd.extend(['-c', 'copy', str(trimmed_path)])
+
+    print(f"[TRIM] Ejecutando: {' '.join(cmd)}", flush=True)
+    result = subprocess.run(cmd, capture_output=True, text=True)
+
+    if result.returncode != 0:
+        print(f"[TRIM ERROR] {result.stderr}", flush=True)
+        # Si falla el recorte, devolver el archivo original
+        return filepath
+
+    # Reemplazar archivo original con el recortado
+    filepath.unlink(missing_ok=True)
+    trimmed_path.rename(filepath)
+    print(f"[TRIM] Recorte completado: {filepath.name}", flush=True)
+    return filepath
 
 
 def _extract_info_sync(url: str) -> dict:
@@ -270,14 +325,19 @@ async def start_download(request: DownloadRequest):
     }
     
     print(f"\n[DOWNLOAD] Iniciando descarga: {request.format_type} - {request.url}", flush=True)
+    if request.trim_start or request.trim_end:
+        print(f"[DOWNLOAD] Recorte: {request.trim_start or '00:00'} -> {request.trim_end or 'fin'}", flush=True)
     
     # Iniciar descarga en background
-    asyncio.create_task(_download_task(task_id, request.url, request.format_type, request.quality, task_dir))
+    asyncio.create_task(_download_task(
+        task_id, request.url, request.format_type, request.quality,
+        task_dir, request.trim_start, request.trim_end
+    ))
     
     return JSONResponse({'task_id': task_id})
 
 
-async def _download_task(task_id: str, url: str, format_type: str, quality: str, task_dir: Path):
+async def _download_task(task_id: str, url: str, format_type: str, quality: str, task_dir: Path, trim_start: str = None, trim_end: str = None):
     """Tarea de descarga en background."""
     try:
         tasks[task_id]['status'] = 'downloading'
@@ -359,12 +419,23 @@ async def _download_task(task_id: str, url: str, format_type: str, quality: str,
         await loop.run_in_executor(executor, lambda: _do_download(url, ydl_opts))
         
         # Buscar archivo descargado
-        downloaded_files = list(task_dir.iterdir())
+        downloaded_files = [f for f in task_dir.iterdir() if not f.name.startswith('.')]
         if downloaded_files:
-            tasks[task_id]['filename'] = downloaded_files[0].name
+            final_file = downloaded_files[0]
+
+            # Aplicar recorte si es necesario
+            if trim_start or trim_end:
+                tasks[task_id]['status'] = 'trimming'
+                print(f"[TRIM] Recortando {final_file.name}...", flush=True)
+                loop2 = asyncio.get_running_loop()
+                final_file = await loop2.run_in_executor(
+                    executor, lambda: _trim_file(final_file, trim_start, trim_end)
+                )
+
+            tasks[task_id]['filename'] = final_file.name
             tasks[task_id]['status'] = 'completed'
             tasks[task_id]['progress'] = 100
-            print(f"[DOWNLOAD] Completada: {downloaded_files[0].name}", flush=True)
+            print(f"[DOWNLOAD] Completada: {final_file.name}", flush=True)
         else:
             tasks[task_id]['status'] = 'error'
             tasks[task_id]['error'] = 'No se encontró el archivo descargado.'

@@ -11,6 +11,7 @@ const state = {
     ws: null,
     lastSearchResults: null,
     lastSearchQuery: '',
+    videoDurationSeconds: 0,
 };
 
 // --- Referencias DOM ---
@@ -48,6 +49,16 @@ const els = {
     searchGrid: $('#searchGrid'),
     backToResultsBtn: $('#backToResultsBtn'),
     backToResultsBtnComplete: $('#backToResultsBtnComplete'),
+    trimToggle: $('#trimToggle'),
+    trimControls: $('#trimControls'),
+    trimStart: $('#trimStart'),
+    trimEnd: $('#trimEnd'),
+    trimSliderStart: $('#trimSliderStart'),
+    trimSliderEnd: $('#trimSliderEnd'),
+    trimRange: $('#trimRange'),
+    trimLabelStart: $('#trimLabelStart'),
+    trimLabelEnd: $('#trimLabelEnd'),
+    trimDurationLabel: $('#trimDurationLabel'),
 };
 
 // --- Inicialización ---
@@ -153,6 +164,19 @@ function bindEvents() {
 
     // Nueva descarga final
     els.newDownloadBtn.addEventListener('click', resetUI);
+
+    // Toggle de recorte
+    els.trimToggle.addEventListener('change', () => {
+        els.trimControls.classList.toggle('hidden', !els.trimToggle.checked);
+    });
+
+    // Slider de recorte - sincronización
+    els.trimSliderStart.addEventListener('input', () => updateTrimFromSliders('start'));
+    els.trimSliderEnd.addEventListener('input', () => updateTrimFromSliders('end'));
+
+    // Inputs manuales - sincronizar con sliders
+    els.trimStart.addEventListener('change', () => syncSliderFromInput('start'));
+    els.trimEnd.addEventListener('change', () => syncSliderFromInput('end'));
 }
 
 // --- Validar URL ---
@@ -307,21 +331,37 @@ function displayVideoInfo(data) {
         });
         state.selectedQuality = state.videoFormats[0].quality;
     }
+
+    // Pre-llenar el campo de recorte con la duración del video
+    state.videoDurationSeconds = data.duration_seconds || 0;
+    setupTrimSliders();
+    els.trimToggle.checked = false;
+    els.trimControls.classList.add('hidden');
 }
 
 // --- Iniciar descarga ---
 async function startDownload(format) {
     const url = els.urlInput.value.trim();
     
+    // Preparar datos de recorte
+    const body = {
+        url,
+        format_type: format,
+        quality: state.selectedQuality,
+    };
+
+    if (els.trimToggle.checked) {
+        const trimStart = els.trimStart.value.trim();
+        const trimEnd = els.trimEnd.value.trim();
+        if (trimStart && trimStart !== '0:00') body.trim_start = trimStart;
+        if (trimEnd) body.trim_end = trimEnd;
+    }
+
     try {
         const response = await fetch('/api/download', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                url,
-                format_type: format,
-                quality: state.selectedQuality
-            }),
+            body: JSON.stringify(body),
         });
 
         if (!response.ok) {
@@ -398,6 +438,99 @@ function finishDownload(filename) {
     setTimeout(() => {
         saveFile();
     }, 500);
+}
+
+// --- Utilidades de tiempo para recorte ---
+function formatSecondsToTime(totalSeconds) {
+    totalSeconds = Math.round(totalSeconds);
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+    if (hours > 0) {
+        return `${hours}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+    }
+    return `${minutes}:${String(seconds).padStart(2, '0')}`;
+}
+
+function parseTimeToSeconds(timeStr) {
+    const parts = timeStr.trim().split(':').map(Number);
+    if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+    if (parts.length === 2) return parts[0] * 60 + parts[1];
+    return parts[0] || 0;
+}
+
+function setupTrimSliders() {
+    const dur = state.videoDurationSeconds;
+    // Configurar rangos de los sliders
+    els.trimSliderStart.max = dur;
+    els.trimSliderEnd.max = dur;
+    els.trimSliderStart.value = 0;
+    els.trimSliderEnd.value = dur;
+
+    // Actualizar inputs de texto
+    els.trimStart.value = '0:00';
+    els.trimEnd.value = formatSecondsToTime(dur);
+
+    // Actualizar labels
+    els.trimLabelStart.textContent = '0:00';
+    els.trimLabelEnd.textContent = formatSecondsToTime(dur);
+    updateTrimDurationLabel();
+    updateTrimRangeBar();
+}
+
+function updateTrimFromSliders(which) {
+    let startVal = parseInt(els.trimSliderStart.value);
+    let endVal = parseInt(els.trimSliderEnd.value);
+
+    // Evitar que se crucen
+    if (which === 'start' && startVal >= endVal) {
+        startVal = endVal - 1;
+        els.trimSliderStart.value = startVal;
+    }
+    if (which === 'end' && endVal <= startVal) {
+        endVal = startVal + 1;
+        els.trimSliderEnd.value = endVal;
+    }
+
+    // Sincronizar con inputs de texto
+    els.trimStart.value = formatSecondsToTime(startVal);
+    els.trimEnd.value = formatSecondsToTime(endVal);
+
+    // Actualizar labels sobre la barra
+    els.trimLabelStart.textContent = formatSecondsToTime(startVal);
+    els.trimLabelEnd.textContent = formatSecondsToTime(endVal);
+
+    updateTrimDurationLabel();
+    updateTrimRangeBar();
+}
+
+function syncSliderFromInput(which) {
+    if (which === 'start') {
+        const sec = parseTimeToSeconds(els.trimStart.value);
+        els.trimSliderStart.value = Math.min(sec, parseInt(els.trimSliderEnd.value) - 1);
+        els.trimLabelStart.textContent = formatSecondsToTime(els.trimSliderStart.value);
+    } else {
+        const sec = parseTimeToSeconds(els.trimEnd.value);
+        els.trimSliderEnd.value = Math.max(sec, parseInt(els.trimSliderStart.value) + 1);
+        els.trimLabelEnd.textContent = formatSecondsToTime(els.trimSliderEnd.value);
+    }
+    updateTrimDurationLabel();
+    updateTrimRangeBar();
+}
+
+function updateTrimDurationLabel() {
+    const startSec = parseInt(els.trimSliderStart.value);
+    const endSec = parseInt(els.trimSliderEnd.value);
+    const diff = endSec - startSec;
+    els.trimDurationLabel.textContent = `Duración: ${formatSecondsToTime(diff)}`;
+}
+
+function updateTrimRangeBar() {
+    const dur = state.videoDurationSeconds || 1;
+    const startPct = (parseInt(els.trimSliderStart.value) / dur) * 100;
+    const endPct = (parseInt(els.trimSliderEnd.value) / dur) * 100;
+    els.trimRange.style.left = startPct + '%';
+    els.trimRange.style.width = (endPct - startPct) + '%';
 }
 
 // --- Guardar archivo ---
