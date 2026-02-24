@@ -162,8 +162,8 @@ def _extract_info_sync(url: str) -> dict:
     ydl_opts = {
         'quiet': False,
         'no_warnings': False,
-        'extract_flat': False,
-        'noplaylist': True,
+        'extract_flat': 'in_playlist',
+        'noplaylist': False,
         'socket_timeout': 30,
         'no_check_certificates': True,
         'geo_bypass': True,
@@ -257,7 +257,33 @@ async def get_video_info(request: VideoInfoRequest):
         if not info:
             raise HTTPException(status_code=400, detail="No se pudo obtener información del video.")
         
-        # Obtener formatos de video disponibles
+        if info.get('_type') == 'playlist':
+            # Es una lista de reproducción
+            entries = info.get('entries', [])
+            cleaned_entries = []
+            for e in entries:
+                url = e.get('url')
+                if url:
+                    if not url.startswith('http'):
+                        url = f"https://www.youtube.com/watch?v={url}"
+                    cleaned_entries.append({
+                        'title': e.get('title', 'Video'),
+                        'url': url,
+                        'duration': format_duration(e.get('duration', 0))
+                    })
+            
+            result = {
+                'is_playlist': True,
+                'title': info.get('title', 'Lista de Reproducción'),
+                'uploader': info.get('uploader', 'Desconocido'),
+                'video_count': len(cleaned_entries),
+                'entries': cleaned_entries,
+                'thumbnail': info.get('thumbnail', '')
+            }
+            print(f"[API] Respuesta de Playlist exitosa: {result['title']} con {result['video_count']} videos", flush=True)
+            return JSONResponse(result)
+
+        # Obtener formatos de video disponibles (solo si no es playlist)
         video_formats = []
         seen_qualities = set()
         
@@ -282,6 +308,7 @@ async def get_video_info(request: VideoInfoRequest):
         video_formats.sort(key=lambda x: x['height'], reverse=True)
         
         result = {
+            'is_playlist': False,
             'title': info.get('title', 'Sin título'),
             'thumbnail': info.get('thumbnail', ''),
             'duration': format_duration(info.get('duration', 0)),

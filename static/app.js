@@ -12,6 +12,9 @@ const state = {
     lastSearchResults: null,
     lastSearchQuery: '',
     videoDurationSeconds: 0,
+    isPlaylist: false,
+    playlistEntries: [],
+    isDownloadingPlaylist: false,
 };
 
 // --- Referencias DOM ---
@@ -286,7 +289,12 @@ async function fetchVideoInfo(urlFromInput = null) {
         }
 
         const data = await response.json();
-        displayVideoInfo(data);
+        
+        if (data.is_playlist) {
+            displayPlaylistInfo(data);
+        } else {
+            displayVideoInfo(data);
+        }
 
         // Mostrar botón "Volver a resultados" si hay resultados cacheados
         if (state.lastSearchResults) {
@@ -303,15 +311,60 @@ async function fetchVideoInfo(urlFromInput = null) {
 }
 
 // --- Mostrar info en la UI ---
+function displayPlaylistInfo(data) {
+    hideAllSections();
+    els.videoInfo.classList.remove('hidden');
+
+    state.isPlaylist = true;
+    state.playlistEntries = data.entries;
+
+    if (data.thumbnail) {
+        els.videoThumbnail.src = data.thumbnail;
+        els.videoThumbnail.style.display = 'block';
+    } else {
+        els.videoThumbnail.style.display = 'none';
+    }
+    
+    els.videoTitle.textContent = data.title;
+    els.videoUploader.textContent = data.uploader;
+    els.videoDuration.textContent = `${data.video_count} videos`;
+    els.videoViews.textContent = 'Lista de reproducción';
+
+    // Ocultar formatos y recorte
+    els.qualitySelector.style.display = 'none';
+    const trimContainer = els.trimToggle.closest('.trim-section');
+    if (trimContainer) trimContainer.style.display = 'none';
+
+    // Actualizar botones
+    els.downloadMp3Btn.querySelector('span').textContent = 'DESCARGAR PLAYLIST MP3';
+    els.downloadMp3Btn.querySelector('small').textContent = 'Audio 1 por 1';
+    
+    els.downloadVideoBtn.querySelector('span').textContent = 'DESCARGAR PLAYLIST VIDEO';
+    els.downloadVideoBtn.querySelector('small').textContent = 'Alta calidad, 1 por 1';
+}
+
 function displayVideoInfo(data) {
     hideAllSections();
     els.videoInfo.classList.remove('hidden');
+
+    state.isPlaylist = false;
+    els.videoThumbnail.style.display = 'block';
 
     els.videoThumbnail.src = data.thumbnail;
     els.videoTitle.textContent = data.title;
     els.videoUploader.textContent = data.uploader;
     els.videoDuration.textContent = data.duration;
     els.videoViews.textContent = formatNumber(data.view_count) + ' vistas';
+
+    // Resetear visibilidades de playlist
+    els.qualitySelector.style.display = 'block';
+    const trimContainer = els.trimToggle.closest('.trim-section');
+    if (trimContainer) trimContainer.style.display = 'block';
+    
+    els.downloadMp3Btn.querySelector('span').textContent = 'DESCARGAR MP3';
+    els.downloadMp3Btn.querySelector('small').textContent = 'Audio 320kbps';
+    els.downloadVideoBtn.querySelector('span').textContent = 'DESCARGAR VIDEO';
+    els.downloadVideoBtn.querySelector('small').textContent = 'Alta Calidad';
 
     // Formatos de video
     els.qualityOptions.innerHTML = '';
@@ -341,6 +394,11 @@ function displayVideoInfo(data) {
 
 // --- Iniciar descarga ---
 async function startDownload(format) {
+    if (state.isPlaylist) {
+        startPlaylistDownload(format);
+        return;
+    }
+
     const url = els.urlInput.value.trim();
     
     // Preparar datos de recorte
@@ -387,6 +445,109 @@ async function startDownload(format) {
 }
 
 // --- WebSocket para progreso ---
+async function startPlaylistDownload(format) {
+    state.isDownloadingPlaylist = true;
+    hideAllSections();
+    els.downloadProgress.classList.remove('hidden');
+    
+    let successCount = 0;
+    
+    for (let i = 0; i < state.playlistEntries.length; i++) {
+        const entry = state.playlistEntries[i];
+        
+        els.progressTitle.textContent = `Descargando ${i + 1}/${state.playlistEntries.length}: ${entry.title}`;
+        els.progressBar.style.width = '0%';
+        els.progressPercent.textContent = '0%';
+        els.progressSpeed.textContent = '--';
+        els.progressETA.textContent = '--';
+        
+        try {
+            await downloadSingleFromPlaylist(entry.url, format);
+            successCount++;
+        } catch (err) {
+            console.error(err);
+            showToast(`Error en video ${i+1}: ${err.message}`, 'error');
+            // Continuar con el siguiente
+            await new Promise(r => setTimeout(r, 2000)); 
+        }
+    }
+    
+    state.isDownloadingPlaylist = false;
+    hideAllSections();
+    els.downloadComplete.classList.remove('hidden');
+    els.completedFilename.textContent = `Lista de reproducción: ${successCount} de ${state.playlistEntries.length} videos descargados.`;
+    
+    // Ocultar botón de "Guardar" porque ya abrieron los cuadros de diálogo automáticos
+    els.saveFileBtn.style.display = 'none';
+
+    if (state.lastSearchResults) {
+        els.backToResultsBtnComplete.classList.remove('hidden');
+    } else {
+        els.backToResultsBtnComplete.classList.add('hidden');
+    }
+}
+
+function downloadSingleFromPlaylist(url, format) {
+    return new Promise(async (resolve, reject) => {
+        try {
+            const body = {
+                url,
+                format_type: format,
+                quality: 'best',
+            };
+            
+            const response = await fetch('/api/download', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+            });
+
+            if (!response.ok) {
+                const error = await response.json();
+                return reject(new Error(error.detail || 'Error al iniciar descarga'));
+            }
+
+            const { task_id } = await response.json();
+            
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${protocol}//${window.location.host}/ws/${task_id}`;
+            const ws = new WebSocket(wsUrl);
+            
+            ws.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                if (data.status === 'downloading') {
+                    els.progressPercent.textContent = data.progress + '%';
+                    els.progressBar.style.width = data.progress + '%';
+                    if (data.speed) els.progressSpeed.textContent = data.speed;
+                    if (data.eta) els.progressETA.textContent = data.eta;
+                } else if (data.status === 'processing') {
+                    els.progressBar.style.width = '95%';
+                    els.progressPercent.textContent = '95%';
+                } else if (data.status === 'completed') {
+                    ws.close();
+                    
+                    // Disparar descarga imperativa para este archivo específico de la lista
+                    const a = document.createElement('a');
+                    a.href = `/api/download/${task_id}`;
+                    a.download = '';
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    
+                    setTimeout(resolve, 1500); // pequeña pausa para no saturar al browser con popups
+                } else if (data.status === 'error') {
+                    ws.close();
+                    reject(new Error(data.error));
+                }
+            };
+            
+            ws.onerror = () => reject(new Error("Error de WS"));
+        } catch(e) {
+            reject(e);
+        }
+    });
+}
+
 function connectProgressWS(taskId) {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${protocol}//${window.location.host}/ws/${taskId}`;
@@ -423,6 +584,7 @@ function finishDownload(filename) {
     hideAllSections();
     els.downloadComplete.classList.remove('hidden');
     els.completedFilename.textContent = filename;
+    els.saveFileBtn.style.display = 'inline-flex'; // Resetear botón de guardar
     showToast('¡Descarga lista!', 'success');
     
     if (state.ws) state.ws.close();

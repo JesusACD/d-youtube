@@ -31,7 +31,7 @@ Descargador de YouTube premium con interfaz web moderna. Descarga videos en MP3 
 ### 1. Clonar el repositorio
 
 ```bash
-git clone https://github.com/tu-usuario/d-youtube.git
+git clone https://github.com/JesusACD/d-youtube.git
 cd d-youtube
 ```
 
