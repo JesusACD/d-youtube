@@ -526,15 +526,17 @@ function downloadSingleFromPlaylist(url, format) {
                 } else if (data.status === 'completed') {
                     ws.close();
                     
-                    // Disparar descarga imperativa para este archivo específico de la lista
-                    const a = document.createElement('a');
-                    a.href = `/api/download/${task_id}`;
-                    a.download = '';
-                    document.body.appendChild(a);
-                    a.click();
-                    document.body.removeChild(a);
+                    // En pywebview el archivo ya se movió mágicamente a ~/Downloads en el backend
+                    if (!window.pywebview) {
+                        const a = document.createElement('a');
+                        a.href = `/api/download/${task_id}`;
+                        a.download = '';
+                        document.body.appendChild(a);
+                        a.click();
+                        document.body.removeChild(a);
+                    }
                     
-                    setTimeout(resolve, 1500); // pequeña pausa para no saturar al browser con popups
+                    setTimeout(resolve, 1500);
                 } else if (data.status === 'error') {
                     ws.close();
                     reject(new Error(data.error));
@@ -584,8 +586,14 @@ function finishDownload(filename) {
     hideAllSections();
     els.downloadComplete.classList.remove('hidden');
     els.completedFilename.textContent = filename;
-    els.saveFileBtn.style.display = 'inline-flex'; // Resetear botón de guardar
-    showToast('¡Descarga lista!', 'success');
+    
+    if (window.pywebview) {
+        els.saveFileBtn.style.display = 'none';
+        showToast('¡Guardado directamente en tu carpeta de Descargas!', 'success');
+    } else {
+        els.saveFileBtn.style.display = 'inline-flex';
+        showToast('¡Descarga lista!', 'success');
+    }
     
     if (state.ws) state.ws.close();
 
@@ -596,10 +604,12 @@ function finishDownload(filename) {
         els.backToResultsBtnComplete.classList.add('hidden');
     }
 
-    // AUTO-DOWNLOAD: Trigger saving the file automatically
-    setTimeout(() => {
-        saveFile();
-    }, 500);
+    // AUTO-DOWNLOAD: Trigger saving the file automatically solo en modo web
+    if (!window.pywebview) {
+        setTimeout(() => {
+            saveFile();
+        }, 500);
+    }
 }
 
 // --- Utilidades de tiempo para recorte ---
@@ -699,6 +709,11 @@ function updateTrimRangeBar() {
 function saveFile() {
     if (!state.taskId) return;
     
+    if (window.pywebview) {
+        showToast('El archivo ya se guardó automáticamente en tu carpeta nativa de Descargas.', 'success');
+        return;
+    }
+    
     // Crear un link temporal y hacer click
     const downloadUrl = `/api/download/${state.taskId}`;
     const a = document.createElement('a');
@@ -708,7 +723,7 @@ function saveFile() {
     a.click();
     document.body.removeChild(a);
     
-    showToast('Archivo guardado en descargas.', 'success');
+    showToast('Archivo enviado a descargas.', 'success');
 }
 
 // --- Utilidades ---

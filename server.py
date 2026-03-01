@@ -10,6 +10,7 @@ import uuid
 import json
 import shutil
 import traceback
+import tempfile
 from pathlib import Path
 from typing import Optional
 from concurrent.futures import ThreadPoolExecutor
@@ -43,9 +44,14 @@ STATIC_DIR = BUNDLE_DIR / "static"
 FFMPEG_DIR = BUNDLE_DIR / "bin"
 FFMPEG_EXE = FFMPEG_DIR / "ffmpeg.exe"
 
-# Pero las descargas SIEMPRE van donde esté el ejecutable/script, guiadas por CURRENT_DIR
-DOWNLOADS_DIR = CURRENT_DIR / "downloads"
+# Carpeta de descargas temporales (en TEMP del sistema para procesar el UUID)
+TEMP_DOWNLOADS_DIR = Path(tempfile.gettempdir()) / "d-youtube_temp"
+TEMP_DOWNLOADS_DIR.mkdir(exist_ok=True)
+
+# Descarga final: VA DIRECTO A CLÁSICA CARPETA "Descargas" de Windows de este usuario.
+DOWNLOADS_DIR = Path.home() / "Downloads"
 DOWNLOADS_DIR.mkdir(exist_ok=True)
+
 MAX_FILE_AGE_SECONDS = 3600  # 1 hora para limpieza automática
 
 app = FastAPI(title="d-youtube", version="1.0.0")
@@ -75,13 +81,11 @@ class DownloadRequest(BaseModel):
 
 # --- Utilidades ---
 def cleanup_old_files():
-    """Elimina archivos descargados que superen la edad máxima."""
+    """Elimina carpetas temporales de descargas fallidas que superen la edad máxima."""
     now = time.time()
     try:
-        for item in DOWNLOADS_DIR.iterdir():
-            if item.is_file() and (now - item.stat().st_mtime) > MAX_FILE_AGE_SECONDS:
-                item.unlink(missing_ok=True)
-            elif item.is_dir() and (now - item.stat().st_mtime) > MAX_FILE_AGE_SECONDS:
+        for item in TEMP_DOWNLOADS_DIR.iterdir():
+            if item.is_dir() and (now - item.stat().st_mtime) > MAX_FILE_AGE_SECONDS:
                 shutil.rmtree(item, ignore_errors=True)
     except Exception:
         pass
@@ -372,7 +376,7 @@ async def get_video_info(request: VideoInfoRequest):
 async def start_download(request: DownloadRequest):
     """Inicia una descarga y retorna un task_id para seguimiento."""
     task_id = str(uuid.uuid4())
-    task_dir = DOWNLOADS_DIR / task_id
+    task_dir = TEMP_DOWNLOADS_DIR / task_id
     task_dir.mkdir(exist_ok=True)
     
     tasks[task_id] = {
@@ -495,10 +499,20 @@ async def _download_task(task_id: str, url: str, format_type: str, quality: str,
                     executor, lambda: _trim_file(final_file, trim_start, trim_end)
                 )
 
-            tasks[task_id]['filename'] = final_file.name
+            # Mover archivo final a Descargas del usuario
+            final_dest = DOWNLOADS_DIR / final_file.name
+            counter = 1
+            while final_dest.exists():
+                final_dest = DOWNLOADS_DIR / f"{final_file.stem} ({counter}){final_file.suffix}"
+                counter += 1
+            
+            shutil.move(str(final_file), str(final_dest))
+            shutil.rmtree(task_dir, ignore_errors=True)
+
+            tasks[task_id]['filename'] = final_dest.name
             tasks[task_id]['status'] = 'completed'
             tasks[task_id]['progress'] = 100
-            print(f"[DOWNLOAD] Completada: {final_file.name}", flush=True)
+            print(f"[DOWNLOAD] Completada y movida a Descargas: {final_dest.name}", flush=True)
         else:
             tasks[task_id]['status'] = 'error'
             tasks[task_id]['error'] = 'No se encontró el archivo descargado.'
@@ -549,8 +563,7 @@ async def download_file(task_id: str):
     if task['status'] != 'completed':
         raise HTTPException(status_code=400, detail="La descarga aún no ha finalizado")
     
-    task_dir = DOWNLOADS_DIR / task_id
-    filepath = task_dir / task['filename']
+    filepath = DOWNLOADS_DIR / task['filename']
     
     if not filepath.exists():
         raise HTTPException(status_code=404, detail="Archivo no encontrado")
