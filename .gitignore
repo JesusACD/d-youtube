@@ -25,3 +25,9 @@ downloads/
 # OS files
 .DS_Store
 Thumbs.db
+
+# PyInstaller & Binaries
+build/
+dist/
+*.spec
+bin/

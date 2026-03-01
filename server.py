@@ -20,11 +20,32 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 import yt_dlp
 
+import sys
+
+# Redirigir salidas para evitar errores Unicode (ej. emojis) en aplicaciones windowed en Windows
+if sys.platform == "win32" and getattr(sys, 'frozen', False):
+    sys.stdout = open(os.devnull, 'w', encoding='utf-8')
+    sys.stderr = open(os.devnull, 'w', encoding='utf-8')
+
 # --- Configuración de rutas absolutas ---
-BASE_DIR = Path(__file__).parent.absolute()
-DOWNLOADS_DIR = BASE_DIR / "downloads"
+if getattr(sys, 'frozen', False):
+    # Si se ejecuta como .exe compilado con PyInstaller
+    BUNDLE_DIR = Path(sys._MEIPASS) 
+    # sys.executable apunta al d-youtube.exe final
+    CURRENT_DIR = Path(sys.executable).parent 
+else:
+    # Si se ejecuta como script normal
+    BUNDLE_DIR = Path(__file__).parent.absolute()
+    CURRENT_DIR = BUNDLE_DIR
+
+# Archivos de interfaz y ffmpeg empaquetados van a BUNDLE_DIR (ejecutable interno)
+STATIC_DIR = BUNDLE_DIR / "static"
+FFMPEG_DIR = BUNDLE_DIR / "bin"
+FFMPEG_EXE = FFMPEG_DIR / "ffmpeg.exe"
+
+# Pero las descargas SIEMPRE van donde esté el ejecutable/script, guiadas por CURRENT_DIR
+DOWNLOADS_DIR = CURRENT_DIR / "downloads"
 DOWNLOADS_DIR.mkdir(exist_ok=True)
-STATIC_DIR = BASE_DIR / "static"
 MAX_FILE_AGE_SECONDS = 3600  # 1 hora para limpieza automática
 
 app = FastAPI(title="d-youtube", version="1.0.0")
@@ -120,7 +141,8 @@ def _trim_file(filepath: Path, trim_start: str = None, trim_end: str = None) -> 
     suffix = filepath.suffix
     trimmed_path = filepath.parent / f"{filepath.stem}_trimmed{suffix}"
 
-    cmd = ['ffmpeg', '-y']
+    ffmpeg_cmd = str(FFMPEG_EXE) if FFMPEG_EXE.exists() else 'ffmpeg'
+    cmd = [ffmpeg_cmd, '-y']
 
     if trim_start:
         cmd.extend(['-ss', trim_start])
@@ -141,7 +163,12 @@ def _trim_file(filepath: Path, trim_start: str = None, trim_end: str = None) -> 
     cmd.extend(['-c', 'copy', str(trimmed_path)])
 
     print(f"[TRIM] Ejecutando: {' '.join(cmd)}", flush=True)
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    
+    creationflags = 0
+    if sys.platform == "win32":
+        creationflags = getattr(subprocess, 'CREATE_NO_WINDOW', 0x08000000)
+
+    result = subprocess.run(cmd, capture_output=True, text=True, creationflags=creationflags)
 
     if result.returncode != 0:
         print(f"[TRIM ERROR] {result.stderr}", flush=True)
@@ -173,6 +200,9 @@ def _extract_info_sync(url: str) -> dict:
         },
     }
     
+    if FFMPEG_DIR.exists():
+        ydl_opts['ffmpeg_location'] = str(FFMPEG_DIR)
+    
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=False)
     
@@ -203,6 +233,9 @@ async def search_youtube(request: VideoInfoRequest):
         'geo_bypass': True,
         'noplaylist': True,
     }
+    
+    if FFMPEG_DIR.exists():
+        ydl_opts['ffmpeg_location'] = str(FFMPEG_DIR)
     
     try:
         loop = asyncio.get_running_loop()
@@ -442,6 +475,9 @@ async def _download_task(task_id: str, url: str, format_type: str, quality: str,
                 'geo_bypass': True,
             }
         
+        if FFMPEG_DIR.exists():
+            ydl_opts['ffmpeg_location'] = str(FFMPEG_DIR)
+        
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(executor, lambda: _do_download(url, ydl_opts))
         
@@ -532,10 +568,25 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 if __name__ == "__main__":
     import uvicorn
-    print("\n" + "="*60, flush=True)
-    print("  d-youtube — Servidor iniciado", flush=True)
-    print("  Abre http://localhost:8000 en tu navegador", flush=True)
-    print("="*60 + "\n", flush=True)
-    # Importante: ejecutar app directamente sin string/reload para evitar problemas en scripts locales
-    # Regresado al puerto 8000 por petición del usuario
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    import threading
+    import webview
+    
+    def run_server():
+        # Ejecutar servidor FastAPI de manera silenciosa en segundo plano
+        uvicorn.run(app, host="127.0.0.1", port=8000, log_level="warning")
+
+    print("\n[INFO] Iniciando d-youtube con interfaz nativa...", flush=True)
+    
+    # Iniciar servidor en un hilo secundario
+    server_thread = threading.Thread(target=run_server, daemon=True)
+    server_thread.start()
+    
+    # Iniciar interfaz gráfica con pywebview
+    webview.create_window(
+        title="d-youtube",
+        url="http://127.0.0.1:8000",
+        width=1000,
+        height=750,
+        min_size=(800, 600)
+    )
+    webview.start()
