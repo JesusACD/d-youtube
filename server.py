@@ -6,6 +6,7 @@ Utiliza yt-dlp como motor de descarga y WebSocket para progreso en tiempo real.
 import asyncio
 import os
 import time
+import random
 import uuid
 import json
 import shutil
@@ -53,6 +54,12 @@ DOWNLOADS_DIR = Path.home() / "Downloads"
 DOWNLOADS_DIR.mkdir(exist_ok=True)
 
 MAX_FILE_AGE_SECONDS = 3600  # 1 hora para limpieza automática
+
+# --- Configuración de reintentos para errores de bot ---
+MAX_RETRIES = 3  # Número máximo de reintentos por descarga/extracción
+RETRY_DELAY_BASE = 3  # Segundos base de espera entre reintentos (se aplica backoff exponencial)
+# Archivo de cookies exportado manualmente (fallback más confiable)
+COOKIES_FILE = CURRENT_DIR / "cookies.txt"
 
 app = FastAPI(title="d-youtube", version="1.0.0")
 
@@ -121,6 +128,57 @@ def format_filesize(size_bytes: Optional[int]) -> str:
     return f"{size_bytes:.1f} TB"
 
 
+def _is_bot_error(error: Exception) -> bool:
+    """Verifica si el error es de detección de bot o rate limit de YouTube."""
+    error_msg = str(error).lower()
+    bot_indicators = [
+        'sign in to confirm',
+        "confirm you're not a bot",
+        'too many requests',
+        '429',
+    ]
+    return any(indicator in error_msg for indicator in bot_indicators)
+
+
+def _is_cookie_db_error(error: Exception) -> bool:
+    """Verifica si el error es por no poder acceder a la DB de cookies del navegador."""
+    error_msg = str(error).lower()
+    return 'could not copy' in error_msg and 'cookie database' in error_msg
+
+
+def _get_cookie_opts() -> dict:
+    """Retorna opciones de cookies si hay un archivo cookies.txt disponible."""
+    if COOKIES_FILE.exists():
+        print(f"[COOKIES] Usando archivo de cookies: {COOKIES_FILE}", flush=True)
+        return {'cookiefile': str(COOKIES_FILE)}
+    return {}
+
+
+def _get_base_yt_opts() -> dict:
+    """Retorna opciones base optimizadas para YouTube con soporte PO Token."""
+    opts = {
+        'no_check_certificates': True,
+        'geo_bypass': True,
+        # Habilitar Node.js como runtime JS (necesario para PO Token y desafíos JS de YouTube)
+        'js_runtimes': {'node': {}, 'deno': {}},
+        # Auto-descargar script EJS para resolver desafíos JS de YouTube (firmas de URL)
+        'remote_components': {'ejs:github'},
+        'extractor_args': {
+            'youtube': {
+                # Usar cliente mweb que es menos propenso a bloqueos de bot
+                'player_client': ['mweb', 'web'],
+            },
+        },
+        'http_headers': {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+            'Accept-Language': 'en-US,en;q=0.9',
+        },
+    }
+    # Agregar cookies.txt si existe
+    opts.update(_get_cookie_opts())
+    return opts
+
+
 def _ydl_extract(url: str, opts: dict) -> dict:
     """Helper genérico para extraer información con yt-dlp."""
     with yt_dlp.YoutubeDL(opts) as ydl:
@@ -187,31 +245,48 @@ def _trim_file(filepath: Path, trim_start: str = None, trim_end: str = None) -> 
 
 
 def _extract_info_sync(url: str) -> dict:
-    """Extrae información del video de forma síncrona (se ejecuta en thread pool)."""
+    """Extrae información del video de forma síncrona con reintentos automáticos."""
     print(f"[INFO] Comenzando extracción de: {url}", flush=True)
     
-    ydl_opts = {
-        'quiet': False,
-        'no_warnings': False,
-        'extract_flat': 'in_playlist',
-        'noplaylist': False,
-        'socket_timeout': 30,
-        'no_check_certificates': True,
-        'geo_bypass': True,
-        'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-            'Accept-Language': 'en-US,en;q=0.9',
-        },
-    }
+    last_error = None
     
-    if FFMPEG_DIR.exists():
-        ydl_opts['ffmpeg_location'] = str(FFMPEG_DIR)
-    
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=False)
-    
-    print(f"[INFO] Extracción completada: {info.get('title', '?')}", flush=True)
-    return info
+    for attempt in range(MAX_RETRIES + 1):
+        try:
+            ydl_opts = {
+                'quiet': False,
+                'no_warnings': False,
+                'extract_flat': 'in_playlist',
+                'noplaylist': False,
+                'socket_timeout': 30,
+            }
+            # Opciones base optimizadas para YouTube (PO Token, cookies, etc.)
+            ydl_opts.update(_get_base_yt_opts())
+            
+            if FFMPEG_DIR.exists():
+                ydl_opts['ffmpeg_location'] = str(FFMPEG_DIR)
+            
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+            
+            if attempt > 0:
+                print(f"[INFO] Extracción exitosa en intento {attempt + 1}", flush=True)
+            print(f"[INFO] Extracción completada: {info.get('title', '?')}", flush=True)
+            return info
+            
+        except Exception as e:
+            last_error = e
+            # Errores de cookie DB no son reintentables (siempre fallarán igual)
+            if _is_cookie_db_error(e):
+                print(f"[WARNING] No se pudo acceder a cookies del navegador (DB bloqueada). Continuando sin cookies...", flush=True)
+                continue
+            if _is_bot_error(e) and attempt < MAX_RETRIES:
+                # Espera con backoff exponencial + jitter aleatorio
+                delay = RETRY_DELAY_BASE * (2 ** attempt) + random.uniform(1, 4)
+                print(f"[RETRY] Error de bot/rate-limit detectado. Reintentando en {delay:.1f}s (intento {attempt + 1}/{MAX_RETRIES})...", flush=True)
+                time.sleep(delay)
+            else:
+                # Error no es de bot o se agotaron los reintentos
+                raise last_error
 
 
 # --- Endpoints ---
@@ -524,9 +599,35 @@ async def _download_task(task_id: str, url: str, format_type: str, quality: str,
 
 
 def _do_download(url: str, opts: dict):
-    """Ejecuta la descarga (en thread pool)."""
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        ydl.download([url])
+    """Ejecuta la descarga con reintentos automáticos por error de bot."""
+    last_error = None
+    
+    for attempt in range(MAX_RETRIES + 1):
+        try:
+            # Crear copia de opciones para no mutar el original
+            current_opts = dict(opts)
+            # Agregar opciones base con PO Token y cookies
+            current_opts.update(_get_base_yt_opts())
+            
+            with yt_dlp.YoutubeDL(current_opts) as ydl:
+                ydl.download([url])
+            
+            if attempt > 0:
+                print(f"[DOWNLOAD] Descarga exitosa en intento {attempt + 1}", flush=True)
+            return  # Descarga exitosa
+            
+        except Exception as e:
+            last_error = e
+            # Errores de cookie DB no son reintentables
+            if _is_cookie_db_error(e):
+                print(f"[WARNING] No se pudo acceder a cookies del navegador (DB bloqueada). Continuando sin cookies...", flush=True)
+                continue
+            if _is_bot_error(e) and attempt < MAX_RETRIES:
+                delay = RETRY_DELAY_BASE * (2 ** attempt) + random.uniform(1, 4)
+                print(f"[RETRY] Error de bot en descarga. Reintentando en {delay:.1f}s (intento {attempt + 1}/{MAX_RETRIES})...", flush=True)
+                time.sleep(delay)
+            else:
+                raise last_error
 
 
 @app.websocket("/ws/{task_id}")
