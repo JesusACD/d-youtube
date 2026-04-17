@@ -13,21 +13,30 @@ import shutil
 import traceback
 import tempfile
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List
 from concurrent.futures import ThreadPoolExecutor
+from collections import OrderedDict
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel
 import yt_dlp
 
 import sys
+import io
 
-# Redirigir salidas para evitar errores Unicode (ej. emojis) en aplicaciones windowed en Windows
-if sys.platform == "win32" and getattr(sys, 'frozen', False):
-    sys.stdout = open(os.devnull, 'w', encoding='utf-8')
-    sys.stderr = open(os.devnull, 'w', encoding='utf-8')
+# Forzar UTF-8 en stdout/stderr para evitar errores de codificación con caracteres Unicode
+# (ej. títulos de videos con caracteres especiales como ｜ ♫ etc.)
+if sys.platform == "win32":
+    if getattr(sys, 'frozen', False):
+        # Modo .exe compilado: redirigir a devnull
+        sys.stdout = open(os.devnull, 'w', encoding='utf-8')
+        sys.stderr = open(os.devnull, 'w', encoding='utf-8')
+    else:
+        # Modo script: forzar UTF-8 en consola
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
 # --- Configuración de rutas absolutas ---
 if getattr(sys, 'frozen', False):
@@ -63,6 +72,18 @@ COOKIES_FILE = CURRENT_DIR / "cookies.txt"
 
 app = FastAPI(title="d-youtube", version="1.0.0")
 
+
+# --- Middleware para evitar caché en archivos estáticos ---
+@app.middleware("http")
+async def no_cache_static(request: Request, call_next):
+    """Agrega headers no-cache a archivos estáticos para evitar versiones obsoletas."""
+    response = await call_next(request)
+    if request.url.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
+
 # --- Verificar archivos críticos ---
 INDEX_PATH = STATIC_DIR / "index.html"
 if not INDEX_PATH.exists():
@@ -74,6 +95,12 @@ executor = ThreadPoolExecutor(max_workers=4)
 # --- Estado global de tareas ---
 tasks: dict = {}
 
+# --- Cola de descargas ---
+download_queue: asyncio.Queue = None  # Se inicializa en startup
+queue_order: list = []  # Lista ordenada de task_ids en la cola
+queue_ws_clients: list = []  # Clientes WebSocket conectados al canal de cola
+queue_worker_task = None  # Referencia al worker de la cola
+
 # --- Modelos ---
 class VideoInfoRequest(BaseModel):
     url: str
@@ -84,6 +111,16 @@ class DownloadRequest(BaseModel):
     quality: Optional[str] = "best"  # Calidad del video
     trim_start: Optional[str] = None  # Tiempo de inicio "MM:SS" o "HH:MM:SS"
     trim_end: Optional[str] = None    # Tiempo de fin "MM:SS" o "HH:MM:SS"
+
+class QueueAddRequest(BaseModel):
+    """Modelo para agregar un item a la cola de descargas."""
+    url: str
+    format_type: str  # "mp3" o "video"
+    quality: Optional[str] = "best"
+    trim_start: Optional[str] = None
+    trim_end: Optional[str] = None
+    title: Optional[str] = None  # Título del video (para mostrar en la cola)
+    thumbnail: Optional[str] = None  # URL de la miniatura
 
 
 # --- Utilidades ---
@@ -159,6 +196,8 @@ def _get_base_yt_opts() -> dict:
     opts = {
         'no_check_certificates': True,
         'geo_bypass': True,
+        # Sanitizar caracteres problemáticos en nombres de archivo en Windows (ej. ｜ → _)
+        'windowsfilenames': True,
         # Habilitar Node.js como runtime JS (necesario para PO Token y desafíos JS de YouTube)
         'js_runtimes': {'node': {}, 'deno': {}},
         # Auto-descargar script EJS para resolver desafíos JS de YouTube (firmas de URL)
@@ -476,10 +515,258 @@ async def start_download(request: DownloadRequest):
     return JSONResponse({'task_id': task_id})
 
 
+# --- Sistema de Cola de Descargas ---
+
+async def _broadcast_queue_state():
+    """Envía el estado actual de la cola a todos los clientes WebSocket conectados."""
+    state = _get_queue_state()
+    dead_clients = []
+    for ws in queue_ws_clients:
+        try:
+            await ws.send_json(state)
+        except Exception:
+            dead_clients.append(ws)
+    # Eliminar clientes desconectados
+    for ws in dead_clients:
+        queue_ws_clients.remove(ws)
+
+
+def _get_queue_state() -> dict:
+    """Retorna el estado serializable de la cola completa."""
+    items = []
+    for tid in queue_order:
+        if tid in tasks:
+            task = tasks[tid]
+            items.append({
+                'task_id': tid,
+                'status': task.get('status', 'pending'),
+                'progress': task.get('progress', 0),
+                'speed': task.get('speed', ''),
+                'eta': task.get('eta', ''),
+                'filename': task.get('filename', ''),
+                'error': task.get('error'),
+                'title': task.get('title', ''),
+                'thumbnail': task.get('thumbnail', ''),
+                'format_type': task.get('format_type', ''),
+                'url': task.get('url', ''),
+            })
+    return {'queue': items}
+
+
+async def _queue_worker():
+    """Worker que procesa la cola de descargas secuencialmente."""
+    global download_queue
+    print("[QUEUE] Worker de cola iniciado.", flush=True)
+    while True:
+        try:
+            # Esperar por el siguiente item en la cola
+            item = await download_queue.get()
+            task_id = item['task_id']
+            
+            # Verificar si la tarea fue cancelada antes de empezar
+            if task_id not in tasks or tasks[task_id].get('status') == 'cancelled':
+                print(f"[QUEUE] Tarea {task_id[:8]} cancelada, saltando.", flush=True)
+                download_queue.task_done()
+                continue
+            
+            print(f"\n[QUEUE] Procesando descarga: {item.get('title', item['url'])}", flush=True)
+            
+            # Crear directorio temporal para la tarea
+            task_dir = TEMP_DOWNLOADS_DIR / task_id
+            task_dir.mkdir(exist_ok=True)
+            
+            # Ejecutar la descarga
+            await _download_task(
+                task_id, item['url'], item['format_type'], item['quality'],
+                task_dir, item.get('trim_start'), item.get('trim_end')
+            )
+            
+            # Notificar a los clientes
+            await _broadcast_queue_state()
+            
+            download_queue.task_done()
+        except Exception as e:
+            print(f"[QUEUE ERROR] Error en worker: {e}", flush=True)
+            traceback.print_exc()
+            try:
+                download_queue.task_done()
+            except ValueError:
+                pass
+
+
+@app.on_event("startup")
+async def startup_event():
+    """Inicializa la cola y el worker al arrancar el servidor."""
+    global download_queue, queue_worker_task
+    download_queue = asyncio.Queue()
+    queue_worker_task = asyncio.create_task(_queue_worker())
+    print("[QUEUE] Sistema de cola de descargas inicializado.", flush=True)
+
+
+@app.post("/api/queue/add")
+async def queue_add(request: QueueAddRequest):
+    """Agrega un item a la cola de descargas."""
+    task_id = str(uuid.uuid4())
+    
+    # Registrar la tarea en el diccionario global
+    tasks[task_id] = {
+        'status': 'queued',
+        'progress': 0,
+        'speed': '',
+        'eta': '',
+        'filename': '',
+        'error': None,
+        'title': request.title or 'Video',
+        'thumbnail': request.thumbnail or '',
+        'format_type': request.format_type,
+        'url': request.url,
+    }
+    
+    # Agregar a la lista ordenada
+    queue_order.append(task_id)
+    
+    # Encolar para procesamiento
+    await download_queue.put({
+        'task_id': task_id,
+        'url': request.url,
+        'format_type': request.format_type,
+        'quality': request.quality or 'best',
+        'trim_start': request.trim_start,
+        'trim_end': request.trim_end,
+        'title': request.title or 'Video',
+        'thumbnail': request.thumbnail or '',
+    })
+    
+    print(f"[QUEUE] Agregado a cola: {request.title or request.url} ({request.format_type})", flush=True)
+    
+    # Notificar a los clientes WebSocket
+    await _broadcast_queue_state()
+    
+    return JSONResponse({'task_id': task_id, 'position': len(queue_order)})
+
+
+@app.get("/api/queue")
+async def queue_list():
+    """Retorna el estado actual de la cola de descargas."""
+    return JSONResponse(_get_queue_state())
+
+
+@app.delete("/api/queue/{task_id}")
+async def queue_remove(task_id: str):
+    """Elimina un item de la cola (si está pendiente) o lo marca como cancelado."""
+    if task_id not in tasks:
+        raise HTTPException(status_code=404, detail="Tarea no encontrada")
+    
+    task = tasks[task_id]
+    
+    if task['status'] in ('queued', 'pending'):
+        # Marcar como cancelado para que el worker lo salte
+        task['status'] = 'cancelled'
+        print(f"[QUEUE] Tarea {task_id[:8]} cancelada (estaba en espera).", flush=True)
+    elif task['status'] == 'downloading':
+        # Marcar como cancelado (la descarga actual no se puede interrumpir fácilmente)
+        task['status'] = 'cancelled'
+        print(f"[QUEUE] Tarea {task_id[:8]} marcada para cancelación.", flush=True)
+    
+    # Remover de la lista de orden
+    if task_id in queue_order:
+        queue_order.remove(task_id)
+    
+    # Limpiar del diccionario
+    if task_id in tasks:
+        del tasks[task_id]
+    
+    # Limpiar directorio temporal si existe
+    task_dir = TEMP_DOWNLOADS_DIR / task_id
+    if task_dir.exists():
+        shutil.rmtree(task_dir, ignore_errors=True)
+    
+    await _broadcast_queue_state()
+    return JSONResponse({'status': 'removed'})
+
+
+@app.post("/api/queue/clear")
+async def queue_clear():
+    """Limpia los items completados y con error de la cola."""
+    to_remove = []
+    for tid in queue_order:
+        if tid in tasks and tasks[tid]['status'] in ('completed', 'error', 'cancelled'):
+            to_remove.append(tid)
+    
+    for tid in to_remove:
+        queue_order.remove(tid)
+        if tid in tasks:
+            del tasks[tid]
+    
+    print(f"[QUEUE] Limpiados {len(to_remove)} items de la cola.", flush=True)
+    await _broadcast_queue_state()
+    return JSONResponse({'cleared': len(to_remove)})
+
+
+@app.post("/api/queue/{task_id}/open")
+async def queue_open_file(task_id: str):
+    """Abre la ubicación del archivo descargado en el explorador de archivos."""
+    if task_id not in tasks:
+        raise HTTPException(status_code=404, detail="Tarea no encontrada")
+    
+    task = tasks[task_id]
+    if task['status'] != 'completed' or not task.get('filename'):
+        raise HTTPException(status_code=400, detail="El archivo aún no está disponible")
+    
+    filepath = DOWNLOADS_DIR / task['filename']
+    if not filepath.exists():
+        raise HTTPException(status_code=404, detail="Archivo no encontrado en disco")
+    
+    import subprocess
+    try:
+        if sys.platform == "win32":
+            # Abrir explorador seleccionando el archivo
+            creationflags = getattr(subprocess, 'CREATE_NO_WINDOW', 0x08000000)
+            subprocess.Popen(
+                ['explorer', '/select,', str(filepath)],
+                creationflags=creationflags
+            )
+        else:
+            # En Linux/Mac, abrir la carpeta contenedora
+            import webbrowser
+            webbrowser.open(str(filepath.parent))
+        
+        return JSONResponse({'status': 'opened'})
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al abrir ubicación: {str(e)}")
+
+@app.websocket("/ws/queue")
+async def websocket_queue(websocket: WebSocket):
+    """WebSocket unificado para recibir actualizaciones de toda la cola."""
+    await websocket.accept()
+    queue_ws_clients.append(websocket)
+    
+    try:
+        # Enviar estado inicial
+        await websocket.send_json(_get_queue_state())
+        
+        # Mantener conexión abierta, enviando heartbeat y estado periódicamente
+        while True:
+            await asyncio.sleep(0.8)
+            await websocket.send_json(_get_queue_state())
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        pass
+    finally:
+        if websocket in queue_ws_clients:
+            queue_ws_clients.remove(websocket)
+
+
 async def _download_task(task_id: str, url: str, format_type: str, quality: str, task_dir: Path, trim_start: str = None, trim_end: str = None):
     """Tarea de descarga en background."""
     try:
+        # Verificar si fue cancelada
+        if task_id not in tasks or tasks[task_id].get('status') == 'cancelled':
+            return
+        
         tasks[task_id]['status'] = 'downloading'
+        await _broadcast_queue_state()
         
         def progress_hook(d):
             """Hook para actualizar progreso."""
@@ -588,14 +875,18 @@ async def _download_task(task_id: str, url: str, format_type: str, quality: str,
             tasks[task_id]['status'] = 'completed'
             tasks[task_id]['progress'] = 100
             print(f"[DOWNLOAD] Completada y movida a Descargas: {final_dest.name}", flush=True)
+            await _broadcast_queue_state()
         else:
             tasks[task_id]['status'] = 'error'
             tasks[task_id]['error'] = 'No se encontró el archivo descargado.'
+            await _broadcast_queue_state()
             
     except Exception as e:
         print(f"[DOWNLOAD ERROR] {e}", flush=True)
-        tasks[task_id]['status'] = 'error'
-        tasks[task_id]['error'] = str(e)
+        if task_id in tasks:
+            tasks[task_id]['status'] = 'error'
+            tasks[task_id]['error'] = str(e)
+            await _broadcast_queue_state()
 
 
 def _do_download(url: str, opts: dict):

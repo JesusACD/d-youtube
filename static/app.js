@@ -15,6 +15,13 @@ const state = {
     isPlaylist: false,
     playlistEntries: [],
     isDownloadingPlaylist: false,
+    // Cola de descargas
+    queueWs: null,
+    queueOpen: false,
+    queueItems: [],
+    // Info del video actualmente analizado (para pasar al queue)
+    currentVideoTitle: '',
+    currentVideoThumbnail: '',
 };
 
 // --- Referencias DOM ---
@@ -62,12 +69,22 @@ const els = {
     trimLabelStart: $('#trimLabelStart'),
     trimLabelEnd: $('#trimLabelEnd'),
     trimDurationLabel: $('#trimDurationLabel'),
+    // Cola de descargas
+    queueFab: $('#queueFab'),
+    queueBadge: $('#queueBadge'),
+    queuePanel: $('#queuePanel'),
+    queueCloseBtn: $('#queueCloseBtn'),
+    queueList: $('#queueList'),
+    queueCount: $('#queueCount'),
+    queueActions: $('#queueActions'),
+    queueClearBtn: $('#queueClearBtn'),
 };
 
 // --- Inicialización ---
 function init() {
     createParticles();
     bindEvents();
+    connectQueueWS();
 }
 
 // --- Partículas de fondo --- 
@@ -180,6 +197,11 @@ function bindEvents() {
     // Inputs manuales - sincronizar con sliders
     els.trimStart.addEventListener('change', () => syncSliderFromInput('start'));
     els.trimEnd.addEventListener('change', () => syncSliderFromInput('end'));
+
+    // --- Cola de Descargas ---
+    els.queueFab.addEventListener('click', toggleQueuePanel);
+    els.queueCloseBtn.addEventListener('click', () => toggleQueuePanel(false));
+    els.queueClearBtn.addEventListener('click', clearCompletedQueue);
 }
 
 // --- Validar URL ---
@@ -387,12 +409,15 @@ function displayVideoInfo(data) {
 
     // Pre-llenar el campo de recorte con la duración del video
     state.videoDurationSeconds = data.duration_seconds || 0;
+    // Guardar info para la cola
+    state.currentVideoTitle = data.title;
+    state.currentVideoThumbnail = data.thumbnail;
     setupTrimSliders();
     els.trimToggle.checked = false;
     els.trimControls.classList.add('hidden');
 }
 
-// --- Iniciar descarga ---
+// --- Iniciar descarga (agrega a la cola) ---
 async function startDownload(format) {
     if (state.isPlaylist) {
         startPlaylistDownload(format);
@@ -401,11 +426,13 @@ async function startDownload(format) {
 
     const url = els.urlInput.value.trim();
     
-    // Preparar datos de recorte
+    // Preparar datos para la cola
     const body = {
         url,
         format_type: format,
         quality: state.selectedQuality,
+        title: state.currentVideoTitle || 'Video',
+        thumbnail: state.currentVideoThumbnail || '',
     };
 
     if (els.trimToggle.checked) {
@@ -416,7 +443,8 @@ async function startDownload(format) {
     }
 
     try {
-        const response = await fetch('/api/download', {
+        // Agregar a la cola en lugar de descargar directamente
+        const response = await fetch('/api/queue/add', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body),
@@ -424,21 +452,29 @@ async function startDownload(format) {
 
         if (!response.ok) {
             const error = await response.json();
-            throw new Error(error.detail || 'Error al iniciar descarga');
+            throw new Error(error.detail || 'Error al agregar a la cola');
         }
 
-        const { task_id } = await response.json();
-        state.taskId = task_id;
+        const data = await response.json();
         
-        // Mostrar progreso
+        // Mostrar el FAB y notificar
+        els.queueFab.classList.remove('hidden');
+        showToast(`🎵 "${body.title}" agregado a la cola`, 'success');
+        
+        // Animar el badge
+        els.queueBadge.classList.add('bump');
+        setTimeout(() => els.queueBadge.classList.remove('bump'), 400);
+        
+        // Limpiar la vista del video para evitar confusión
         hideAllSections();
-        els.downloadProgress.classList.remove('hidden');
-        els.progressTitle.textContent = `Preparando ${format.toUpperCase()}...`;
-        els.progressBar.style.width = '0%';
-        els.progressPercent.textContent = '0%';
+        els.urlInput.value = '';
+        els.clearBtn.classList.remove('visible');
+        els.urlInput.focus();
         
-        // Conectar WebSocket
-        connectProgressWS(task_id);
+        // Abrir el panel automáticamente si es el primer item
+        if (state.queueItems.length <= 1) {
+            toggleQueuePanel(true);
+        }
     } catch (error) {
         showToast(error.message, 'error');
     }
@@ -768,6 +804,266 @@ function formatNumber(num) {
     if (num >= 1000000) return (num / 1000000).toFixed(1) + 'M';
     if (num >= 1000) return (num / 1000).toFixed(1) + 'K';
     return num;
+}
+
+
+// ============================================
+// --- SISTEMA DE COLA DE DESCARGAS ---
+// ============================================
+
+/**
+ * Conecta el WebSocket unificado de la cola.
+ * Recibe actualizaciones periódicas de toda la cola.
+ */
+function connectQueueWS() {
+    if (state.queueWs) {
+        try { state.queueWs.close(); } catch(e) {}
+    }
+
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${protocol}//${window.location.host}/ws/queue`;
+    
+    state.queueWs = new WebSocket(wsUrl);
+    
+    state.queueWs.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+        if (data.queue) {
+            state.queueItems = data.queue;
+            renderQueuePanel();
+        }
+    };
+    
+    state.queueWs.onclose = () => {
+        // Reconectar automáticamente después de 2 segundos
+        setTimeout(() => {
+            console.log('[QUEUE WS] Reconectando...');
+            connectQueueWS();
+        }, 2000);
+    };
+    
+    state.queueWs.onerror = () => {
+        // El onclose se encargará de reconectar
+    };
+}
+
+/**
+ * Muestra/oculta el panel de la cola.
+ */
+function toggleQueuePanel(forceState) {
+    const shouldOpen = typeof forceState === 'boolean' ? forceState : !state.queueOpen;
+    state.queueOpen = shouldOpen;
+    
+    if (shouldOpen) {
+        els.queuePanel.classList.remove('hidden');
+    } else {
+        els.queuePanel.classList.add('hidden');
+    }
+}
+
+/**
+ * Renderiza los items de la cola en el panel.
+ */
+function renderQueuePanel() {
+    const items = state.queueItems;
+    const total = items.length;
+    const activeCount = items.filter(i => ['queued', 'downloading', 'processing', 'pending'].includes(i.status)).length;
+    const hasCompleted = items.some(i => ['completed', 'error'].includes(i.status));
+    
+    // Actualizar badge y contador
+    els.queueBadge.textContent = activeCount;
+    els.queueCount.textContent = total;
+    
+    // Mostrar/ocultar FAB
+    if (total > 0) {
+        els.queueFab.classList.remove('hidden');
+    } else {
+        els.queueFab.classList.add('hidden');
+        if (state.queueOpen) toggleQueuePanel(false);
+    }
+    
+    // Pulso en FAB si hay descargas activas
+    if (activeCount > 0) {
+        els.queueFab.classList.add('has-active');
+    } else {
+        els.queueFab.classList.remove('has-active');
+    }
+    
+    // Mostrar/ocultar botón de limpiar
+    if (hasCompleted) {
+        els.queueActions.classList.remove('hidden');
+    } else {
+        els.queueActions.classList.add('hidden');
+    }
+    
+    // Renderizar lista de items
+    if (total === 0) {
+        els.queueList.innerHTML = `
+            <div class="queue-empty">
+                <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.3">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                    <polyline points="7 10 12 15 17 10"></polyline>
+                    <line x1="12" y1="15" x2="12" y2="3"></line>
+                </svg>
+                <p>La cola está vacía</p>
+                <small>Agrega videos para descargar</small>
+            </div>
+        `;
+        return;
+    }
+    
+    // Actualizar items existentes en lugar de reemplazar todo el DOM (evita saltos visuales)
+    const existingIds = new Set();
+    items.forEach(item => { existingIds.add(item.task_id); });
+    
+    // Eliminar items que ya no existen en la cola
+    els.queueList.querySelectorAll('.queue-item').forEach(el => {
+        if (!existingIds.has(el.dataset.taskId)) {
+            el.remove();
+        }
+    });
+    
+    items.forEach(item => {
+        const statusInfo = getStatusInfo(item.status);
+        const progressClass = item.status === 'completed' ? 'completed' : (item.status === 'error' ? 'error' : '');
+        const progressWidth = item.status === 'error' ? 100 : item.progress;
+        
+        // Texto de meta según estado
+        let metaText = statusInfo.label;
+        if (item.status === 'downloading' && item.speed) {
+            metaText = `${item.progress}% · ${item.speed}`;
+        } else if (item.status === 'completed' && item.filename) {
+            metaText = '✅ Guardado en Descargas';
+        } else if (item.status === 'error' && item.error) {
+            metaText = item.error.substring(0, 50);
+        }
+        
+        // Buscar si el item ya existe en el DOM
+        let el = els.queueList.querySelector(`.queue-item[data-task-id="${item.task_id}"]`);
+        
+        if (el) {
+            // Actualizar in-place solo los valores dinámicos (sin recrear el DOM)
+            const statusEl = el.querySelector('.queue-item-status');
+            if (statusEl) {
+                statusEl.className = `queue-item-status status-${item.status}`;
+                statusEl.textContent = metaText;
+            }
+            const progressBar = el.querySelector('.queue-item-progress-bar');
+            if (progressBar) {
+                progressBar.style.width = progressWidth + '%';
+                progressBar.className = `queue-item-progress-bar ${progressClass}`;
+            }
+            // Actualizar interactividad según estado
+            if (item.status === 'completed') {
+                el.style.cursor = 'pointer';
+                el.title = 'Clic para abrir ubicación del archivo';
+                el.onclick = (e) => {
+                    if (!e.target.closest('.queue-item-remove')) openFileLocation(item.task_id);
+                };
+            } else {
+                el.style.cursor = '';
+                el.title = '';
+                el.onclick = null;
+            }
+        } else {
+            // Crear nuevo item en el DOM
+            const div = document.createElement('div');
+            div.className = 'queue-item';
+            div.dataset.taskId = item.task_id;
+            div.innerHTML = `
+                <div class="queue-item-thumb">
+                    ${item.thumbnail ? `<img src="${item.thumbnail}" alt="">` : ''}
+                    ${item.status === 'downloading' ? `
+                        <div class="queue-item-status-icon">
+                            <div class="spinner" style="width:16px;height:16px;border-width:2px;"></div>
+                        </div>
+                    ` : ''}
+                </div>
+                <div class="queue-item-info">
+                    <div class="queue-item-title" title="${item.title}">${item.title}</div>
+                    <div class="queue-item-meta">
+                        <span class="queue-item-format">${item.format_type}</span>
+                        <span class="queue-item-status status-${item.status}">${metaText}</span>
+                    </div>
+                    <div class="queue-item-progress">
+                        <div class="queue-item-progress-bar ${progressClass}" style="width: ${progressWidth}%"></div>
+                    </div>
+                </div>
+                <button class="queue-item-remove" title="Eliminar" onclick="removeQueueItem('${item.task_id}')">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <line x1="18" y1="6" x2="6" y2="18"></line>
+                        <line x1="6" y1="6" x2="18" y2="18"></line>
+                    </svg>
+                </button>
+            `;
+            // Agregar click handler si está completado
+            if (item.status === 'completed') {
+                div.style.cursor = 'pointer';
+                div.title = 'Clic para abrir ubicación del archivo';
+                div.addEventListener('click', (e) => {
+                    if (!e.target.closest('.queue-item-remove')) openFileLocation(item.task_id);
+                });
+            }
+            els.queueList.appendChild(div);
+        }
+    });
+}
+
+/**
+ * Retorna información visual para cada estado.
+ */
+function getStatusInfo(status) {
+    const map = {
+        'queued': { label: 'En espera', color: 'var(--text-muted)' },
+        'pending': { label: 'Pendiente', color: 'var(--text-muted)' },
+        'downloading': { label: 'Descargando...', color: '#5b8def' },
+        'processing': { label: 'Procesando...', color: 'var(--warning)' },
+        'trimming': { label: 'Recortando...', color: 'var(--warning)' },
+        'completed': { label: 'Completado', color: 'var(--success)' },
+        'error': { label: 'Error', color: 'var(--error)' },
+        'cancelled': { label: 'Cancelado', color: 'var(--text-muted)' },
+    };
+    return map[status] || { label: status, color: 'var(--text-muted)' };
+}
+
+/**
+ * Elimina un item de la cola.
+ */
+async function removeQueueItem(taskId) {
+    try {
+        await fetch(`/api/queue/${taskId}`, { method: 'DELETE' });
+    } catch (e) {
+        console.error('[QUEUE] Error al eliminar item:', e);
+    }
+}
+
+/**
+ * Abre la ubicación del archivo descargado en el explorador.
+ */
+async function openFileLocation(taskId) {
+    try {
+        const response = await fetch(`/api/queue/${taskId}/open`, { method: 'POST' });
+        if (!response.ok) {
+            const error = await response.json();
+            showToast(error.detail || 'No se pudo abrir la ubicación', 'error');
+        }
+    } catch (e) {
+        showToast('Error al abrir la ubicación del archivo', 'error');
+    }
+}
+
+/**
+ * Limpia los items completados y con error.
+ */
+async function clearCompletedQueue() {
+    try {
+        const response = await fetch('/api/queue/clear', { method: 'POST' });
+        const data = await response.json();
+        if (data.cleared > 0) {
+            showToast(`${data.cleared} item(s) eliminados de la cola`, 'info');
+        }
+    } catch (e) {
+        console.error('[QUEUE] Error al limpiar cola:', e);
+    }
 }
 
 // Iniciar aplicación
